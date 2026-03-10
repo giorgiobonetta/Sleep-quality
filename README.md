@@ -183,32 +183,7 @@ The main empirical results are:
 * ggplot2
 * dplyr
 * RMarkdown
-
----
-
-# Project Structure
-
-Example repository structure:
-
-```
-sleep-quality-mixed-models/
-
-README.md
-
-data/
-    sleep_health_dataset.csv
-
-code/
-    LMDD_code_group3.Rmd
-
-report/
-    LMDD_project_group_3.pdf
-
-output/
-    figures/
-    model_results/
-```
-
+  
 ---
 
 # Key Statistical Concepts
