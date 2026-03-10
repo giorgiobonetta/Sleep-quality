@@ -1,0 +1,1597 @@
+---
+title: "LMDD project code (group3)"
+author: "Giorgio Bonetta, Maximilian
+ Brunner, Simon Derleth"
+date: "2025-12-10"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    code_folding: show
+    code_download: true
+    df_print: paged
+    number_sections: true
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  warning = FALSE, 
+  message = FALSE,
+  fig.align = "center",  
+  fig.width = 10,        
+  fig.height = 6,
+  cache = TRUE
+)
+```
+
+# Import packages
+
+```{r}
+library(dplyr)
+library(readr)
+library(lme4)
+library(nlme)
+library(MASS)
+library(ordinal)
+library(arm)
+library(car)
+library(tidyr)
+library(ggplot2)
+library(lmtest)
+library(pbkrtest)
+library(lme4)
+
+```
+
+# Import dataset
+
+```{r dataset, echo=FALSE, cache = TRUE}
+dataset <- read.csv("insert path")
+```
+
+## Clean Dataset
+
+```{r pressure, echo=TRUE, cache = TRUE}
+sleep <- dataset
+attach(dataset)
+
+# Replace spaces in column names
+names(dataset) <- gsub(" ", ".", names(dataset))
+
+# Convert categorical variables to factors
+dataset$Occupation <- factor(dataset$Occupation)
+dataset$Gender <- factor(dataset$Gender)
+dataset$BMI.Category <- factor(dataset$BMI.Category)
+dataset$Sleep.Disorder <- factor(dataset$Sleep.Disorder)
+
+dataset$QoS_numeric <- as.numeric(dataset$Quality.of.Sleep)
+
+# RESCALE NUMERIC PREDICTORS
+numeric_vars <- c("Age", "Sleep.Duration", "Physical.Activity.Level",
+                  "Stress.Level", "Heart.Rate", "Daily.Steps")
+
+dataset <- dataset %>%
+  mutate(across(all_of(numeric_vars), scale))
+```
+
+# Multicollinearity VIF analysis
+
+```{r}
+multicolin <- lm(QoS_numeric ~ Gender + Age + Occupation + Sleep.Duration + Quality.of.Sleep + 
+                   Physical.Activity.Level + Stress.Level + BMI.Category + Blood.Pressure + 
+                   Heart.Rate + Daily.Steps + Sleep.Disorder,
+                 data = dataset)
+alias(multicolin) #Blood.Pressure is colinear
+summary(multicolin)
+multicolin2 <- lm(QoS_numeric ~ Gender + Age + Occupation + Sleep.Duration + Quality.of.Sleep + 
+                   Physical.Activity.Level + Stress.Level + BMI.Category + 
+                   Heart.Rate + Daily.Steps + Sleep.Disorder,
+                 data = dataset)
+vif(multicolin2) #scaled GVIF levels are acceptable, only Quality.of.Sleep might pose trouble
+
+```
+Extended model doesn't function due to colinearity
+```{r}
+#vif(multicolin)
+```
+
+
+
+# Simple linear regression
+Will run, but is conceptually wrong 
+```{r}
+model <- lm(
+  QoS_numeric ~ Gender + Age + Occupation + Sleep.Duration +
+    Physical.Activity.Level + Stress.Level + BMI.Category +
+    Heart.Rate + Daily.Steps + Sleep.Disorder,
+  data = dataset
+)
+summary(model)
+
+#Test Gender/Occupation dependence (for Diagnostic Assessment part)
+chisq.test(dataset$Gender, dataset$Occupation)
+```
+# Mixed effect model with random intercept
+Will run, but may be conceptually wrong
+```{r}
+mixed_intercept <- lmer(
+  QoS_numeric ~ Gender + Age + Sleep.Duration +
+    Physical.Activity.Level + Stress.Level + BMI.Category +
+    Heart.Rate + Daily.Steps + Sleep.Disorder +
+    (1 | Occupation),
+  data = dataset
+)
+vif(mixed_intercept)
+summary(mixed_intercept)
+```
+# Mixed effect model with random slope
+```{r}
+mixed_slope <- lmer(
+  QoS_numeric ~ Gender + Age + Sleep.Duration +
+    Physical.Activity.Level + Stress.Level + BMI.Category +
+    Heart.Rate + Daily.Steps + Sleep.Disorder +
+    (1 + Stress.Level | Occupation),
+  data = dataset
+)
+summary(mixed_slope)
+vif(mixed_slope)
+
+lrtest(mixed_intercept, mixed_slope)
+lrtest(model, mixed_intercept)
+```
+
+## Bootstrap
+We conduct a bootstrap LRT to assess that mixed_slope model is better performing:
+```{r}
+bootstrap_test <- PBmodcomp(largeModel = mixed_slope, 
+                            smallModel = mixed_intercept, 
+                            nsim = 1000,        # Number of simulations (use 1000 for paper)
+                            seed = 123)         # Set seed for reproducibility
+
+# Print the results
+summary(bootstrap_test)
+```
+# CLMM with random slope
+```{r}
+dataset$Quality.of.Sleep <- ordered(dataset$Quality.of.Sleep)
+
+model_clmm2 <- clmm(
+  Quality.of.Sleep ~ Stress.Level + Physical.Activity.Level + Age +
+    BMI.Category + Gender +
+    (1 + Stress.Level | Occupation),
+  data = dataset,
+  link = "logit"
+)
+summary(model_clmm2)
+vif(model_clmm2) #Check for multicollinearity
+```
+
+##ANOVA of CLMM
+We need to confirm the CLMM with random slope performs better than the CLMM with random intercept:
+```{r}
+model_clmm1 <- clmm(
+  Quality.of.Sleep ~ Stress.Level + Physical.Activity.Level + Age +
+    BMI.Category + Gender +
+    (1 | Occupation),
+  data = dataset,
+  link = "logit"
+)
+summary(model_clmm1)
+vif(model_clmm1)
+
+anova(model_clmm1, model_clmm2)
+```
+
+# Diagnostic plots 
+
+```{r Color Palette, message=FALSE, warning=FALSE, cache=TRUE, echo = TRUE}
+### COLOR PALETTE #####
+
+col_main   <- "#1B5E9E"   # deep blue
+col_points <- "#4EA5D9"   # light blue
+col_line   <- "#E84855"   # contrasting red
+col_fill   <- "#A7D5EB"   # soft blue fill
+col_box    <- "#D9E8F5"   # muted boxplot color
+```
+
+## Linear Model 
+```{r Fixed Diagnostics plots, message=FALSE, warning=FALSE, cache=TRUE}
+#1) Residuals vs Fitted
+plot(model, which = 1,
+     col = col_points, pch = 19,
+     main = "Residuals vs Fitted",
+     col.main = col_main)
+abline(h = 0, col = col_line, lwd = 2)
+
+#2) Normal Q–Q Plot
+plot(model, which = 2,
+     col = col_points, pch = 19,
+     main = "Normal Q–Q Plot",
+     col.main = col_main)
+qqline(residuals(model), col = col_line, lwd = 2)
+
+#3) Histogram of Residuals 
+hist(residuals(model),
+     breaks = 20,
+     col = col_fill,
+     border = "white",
+     main = "Histogram of Residuals",
+     xlab = "Residuals",
+     col.main = col_main)
+abline(v = mean(residuals(model)), col = col_line, lwd = 2)
+
+#4) Predicted vs Observed
+plot(predict(model),
+     dataset$QoS_numeric,
+     pch = 19,
+     col = col_points,
+     xlab = "Predicted QoS",
+     ylab = "Observed QoS",
+     main = "Predicted vs Observed",
+     col.main = col_main)
+abline(0, 1, col = col_line, lwd = 2)
+
+#5) Residuals by Occupation 
+boxplot(residuals(model) ~ dataset$Occupation,
+        main = "Residuals by Occupation",
+        xlab = "Occupation",
+        ylab = "Residuals",
+        las = 2,
+        col = col_box,
+        border = col_main,
+        col.main = col_main)
+abline(h = 0, col = col_line, lwd = 2)
+
+```
+
+
+## Random Intercept Mixed Models
+```{r Mixed Diagnostics plots, message=FALSE, warning=FALSE, cache=TRUE}
+
+#1) RESIDUALS VS FITTED — RANDOM INTERCEPT LMM
+plot(
+  fitted(mixed_intercept), residuals(mixed_intercept),
+  pch = 19, col = col_points,
+  xlab = "Fitted Values",
+  ylab = "Residuals",
+  main = "Residuals vs Fitted (LMM – Random Intercept)"
+)
+abline(h = 0, col = col_line, lwd = 2)
+
+
+#2) Q–Q PLOT OF RESIDUALS — RANDOM INTERCEPT
+qqnorm(
+  residuals(mixed_intercept),
+  main = "Q-Q Plot of Residuals (LMM – Random Intercept)",
+  pch = 19, col = col_points
+)
+qqline(residuals(mixed_intercept), col = col_line, lwd = 2)
+
+#3) CATERPILLAR PLOT — RANDOM INTERCEPTS
+library(ggplot2)
+
+df_ranef <- data.frame(
+  group = rownames(ranef(mixed_intercept)$Occupation),
+  intercept = ranef(mixed_intercept)$Occupation[,1]
+)
+
+ggplot(df_ranef, aes(x = reorder(group, intercept), y = intercept)) +
+  geom_point(color = col_main, size = 3) +
+  geom_hline(yintercept = 0, col = col_line, lwd = 1) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Caterpillar Plot of Random Intercepts",
+    x = "Occupation",
+    y = "Random Intercept"
+  )
+
+#4) RESIDUALS BY OCCUPATION — RANDOM INTERCEPT
+boxplot(
+  residuals(mixed_intercept) ~ dataset$Occupation,
+  main = "Residuals by Occupation (LMM – Random Intercept)",
+  xlab = "Occupation", ylab = "Residuals",
+  las = 2,
+  col = col_box
+)
+
+#5) FITTED VS OBSERVED — RANDOM INTERCEPT LMM
+plot(
+  fitted(mixed_intercept), dataset$QoS_numeric,
+  pch = 19, col = col_main,
+  xlab = "Fitted Values",
+  ylab = "Observed QoS",
+  main = "Fitted vs Observed Values (LMM – Random Intercept)"
+)
+abline(0, 1, col = col_line, lwd = 2)
+```
+
+## Random Slope Mixed Models
+
+```{r Mixed Slope Diagnostics plots, message=FALSE, warning=FALSE, cache=TRUE}
+
+# 1. Residuals vs Fitted
+plot(
+  fitted(mixed_slope), residuals(mixed_slope),
+  pch = 19, col = col_points,
+  xlab = "Fitted Values",
+  ylab = "Residuals",
+  main = "Residuals vs Fitted (LMM – Random Slope)"
+)
+abline(h = 0, col = col_line, lwd = 2)
+
+# 2. Q–Q Plot
+qqnorm(
+  residuals(mixed_slope),
+  main = "Q-Q Plot (LMM – Random Slope)",
+  pch = 19, col = col_points
+)
+qqline(residuals(mixed_slope), col = col_line, lwd = 2)
+
+# 3. Caterpillar Plot — Random Intercepts (Slope Model)
+df_ranef_slope_int <- data.frame(
+  group = rownames(ranef(mixed_slope)$Occupation),
+  intercept = ranef(mixed_slope)$Occupation[,1]
+)
+
+ggplot(df_ranef_slope_int, aes(x = reorder(group, intercept), y = intercept)) +
+  geom_point(color = col_main, size = 3) +
+  geom_hline(yintercept = 0, col = col_line, lwd = 1) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Random Intercepts (Random Slope Model)",
+    x = "Occupation",
+    y = "Random Intercept"
+  )
+
+# 4. Caterpillar Plot — Random Slopes
+df_ranef_slope_only <- data.frame(
+  group = rownames(ranef(mixed_slope)$Occupation),
+  slope = ranef(mixed_slope)$Occupation[,2]
+)
+
+ggplot(df_ranef_slope_only, aes(x = reorder(group, slope), y = slope)) +
+  geom_point(color = col_main, size = 3) +
+  geom_hline(yintercept = 0, col = col_line, lwd = 1) +   # line added
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Random Slopes for Stress (Random Slope Model)",
+    x = "Occupation",
+    y = "Random Slope"
+  )
+
+# 5. Residuals by Occupation
+boxplot(
+  residuals(mixed_slope) ~ dataset$Occupation,
+  main = "Residuals by Occupation (LMM – Random Slope)",
+  xlab = "Occupation",
+  ylab = "Residuals",
+  las = 2,
+  col = col_box,
+  border = col_main
+)
+abline(h = 0, col = col_line, lwd = 2)
+
+# 6. Fitted vs Observed
+plot(
+  fitted(mixed_slope), dataset$QoS_numeric,
+  pch = 19,
+  col = col_main,
+  xlab = "Fitted Values",
+  ylab = "Observed QoS",
+  main = "Fitted vs Observed (LMM – Random Slope)"
+)
+abline(0, 1, col = col_line, lwd = 2)
+
+# 7. Intercept–Slope Correlation
+ranef_slope <- ranef(mixed_slope)$Occupation
+
+plot(
+  ranef_slope[,1], ranef_slope[,2],
+  pch = 19, col = col_points,
+  xlab = "Random Intercept",
+  ylab = "Random Slope (Stress Level)",
+  main = "Correlation Between Random Intercept and Random Slope"
+)
+abline(
+  lm(ranef_slope[,2] ~ ranef_slope[,1]),
+  col = col_line, lwd = 2
+)
+```
+
+## Random Intercepts CLMM
+```{r CLMM intercepts Diagnostics plots, message=FALSE, warning=FALSE, cache=TRUE}
+# 1. Residuals vs Fitted
+plot(
+  fitted(mixed_intercept), residuals(mixed_intercept),
+  pch = 19, col = col_points,
+  xlab = "Fitted Values",
+  ylab = "Residuals",
+  main = "Residuals vs Fitted (CLMM – Random Intercept)"
+)
+abline(h = 0, col = col_line, lwd = 2)
+
+# 2. Q–Q Plot
+qqnorm(
+  residuals(mixed_intercept),
+  main = "Q-Q Plot of Residuals (CLMM – Random Intercept)",
+  pch = 19, col = col_points
+)
+qqline(residuals(mixed_intercept), col = col_line, lwd = 2)
+
+# 3. Caterpillar Plot — Random Intercepts
+df_ranef <- data.frame(
+  group = rownames(ranef(mixed_intercept)$Occupation),
+  intercept = ranef(mixed_intercept)$Occupation[,1]
+)
+
+ggplot(df_ranef, aes(x = reorder(group, intercept), y = intercept)) +
+  geom_point(color = col_main, size = 3) +
+  geom_hline(yintercept = 0, col = col_line, lwd = 1) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Caterpillar Plot of CLMM Random Intercepts",
+    x = "Occupation",
+    y = "Random Intercept"
+  )
+
+# 4. Residuals by Occupation
+boxplot(
+  residuals(mixed_intercept) ~ dataset$Occupation,
+  main = "Residuals by Occupation (CLMM – Random Intercept)",
+  xlab = "Occupation",
+  ylab = "Residuals",
+  las = 2,
+  col = col_box,
+  border = col_main
+)
+abline(h = 0, col = col_line, lwd = 2)
+
+# 5. Fitted vs Observed
+plot(
+  fitted(mixed_intercept), dataset$QoS_numeric,
+  pch = 19,
+  col = col_main,
+  xlab = "Fitted Values",
+  ylab = "Observed QoS",
+  main = "Fitted vs Observed (CLMM – Random Intercept)"
+)
+abline(0, 1, col = col_line, lwd = 2)
+
+
+```
+
+## Random Slope CLMM
+```{r CLMM Slope Diagnostics plots, message=FALSE, warning=FALSE, cache=TRUE}
+# 1. Residuals vs Fitted
+plot(
+  fitted(mixed_slope), residuals(mixed_slope),
+  pch = 19, col = col_points,
+  xlab = "Fitted Values",
+  ylab = "Residuals",
+  main = "Residuals vs Fitted (CLMM – Random Slope)"
+)
+abline(h = 0, col = col_line, lwd = 2)
+
+# 2. Q–Q Plot
+qqnorm(
+  residuals(mixed_slope),
+  main = "Q-Q Plot (CLMM – Random Slope)",
+  pch = 19, col = col_points
+)
+qqline(residuals(mixed_slope), col = col_line, lwd = 2)
+
+# 3. Caterpillar Plot — Random Intercepts (CLMM Slope Model)
+df_ranef_slope_int <- data.frame(
+  group = rownames(ranef(mixed_slope)$Occupation),
+  intercept = ranef(mixed_slope)$Occupation[,1]
+)
+
+ggplot(df_ranef_slope_int, aes(x = reorder(group, intercept), y = intercept)) +
+  geom_point(color = col_main, size = 3) +
+  geom_hline(yintercept = 0, col = col_line, lwd = 1) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Random Intercepts (CLMM Random Slope Model)",
+    x = "Occupation",
+    y = "Random Intercept"
+  )
+
+# 4. Caterpillar Plot — Random Slopes
+df_ranef_slope_only <- data.frame(
+  group = rownames(ranef(mixed_slope)$Occupation),
+  slope = ranef(mixed_slope)$Occupation[,2]
+)
+
+ggplot(df_ranef_slope_only, aes(x = reorder(group, slope), y = slope)) +
+  geom_point(color = col_main, size = 3) +
+  geom_hline(yintercept = 0, col = col_line, lwd = 1) +   # line added
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Random Slopes for Stress (CLMM Random Slope Model)",
+    x = "Occupation",
+    y = "Random Slope"
+  )
+
+# 5. Residuals by Occupation
+boxplot(
+  residuals(mixed_slope) ~ dataset$Occupation,
+  main = "Residuals by Occupation (CLMM – Random Slope)",
+  xlab = "Occupation",
+  ylab = "Residuals",
+  las = 2,
+  col = col_box,
+  border = col_main
+)
+abline(h = 0, col = col_line, lwd = 2)
+
+# 6. Fitted vs Observed
+plot(
+  fitted(mixed_slope), dataset$QoS_numeric,
+  pch = 19,
+  col = col_main,
+  xlab = "Fitted Values",
+  ylab = "Observed QoS",
+  main = "Fitted vs Observed (CLMM – Random Slope)"
+)
+abline(0, 1, col = col_line, lwd = 2)
+
+# 7. Intercept–Slope Correlation
+ranef_slope <- ranef(mixed_slope)$Occupation
+
+plot(
+  ranef_slope[,1], ranef_slope[,2],
+  pch = 19, col = col_points,
+  xlab = "Random Intercept CLMM",
+  ylab = "Random Slope CLMM (Stress Level)",
+  main = "Correlation Between Random Intercept and Random Slope"
+)
+abline(
+  lm(ranef_slope[,2] ~ ranef_slope[,1]),
+  col = col_line, lwd = 2
+)
+
+
+
+```
+
+# Monte Carlo simulations
+
+First, we want to compute how OLS and GLS perform in the simple linear setting to assess potential heteroskedasticity
+
+## Simple linear model
+```{r Simple linear model, message=FALSE, warning=FALSE, cache=TRUE}
+attach(sleep)
+set.seed(42)
+
+# --- Monte Carlo setup ---
+nsim <- 2000
+n    <- nrow(sleep)
+model <- lm(Quality.of.Sleep ~ Gender + Age + Occupation +
+              Sleep.Duration + Physical.Activity.Level +
+              Stress.Level + BMI.Category + Heart.Rate +
+              Daily.Steps + Sleep.Disorder,
+            data = sleep)
+
+beta_true <- coef(model)
+X_real    <- model.matrix(model)
+n_params  <- length(beta_true)
+
+# --- Storage ---
+ols_est <- matrix(NA, nsim, n_params)
+gls_est <- matrix(NA, nsim, n_params)
+ols_cov <- matrix(NA, nsim, n_params)
+gls_cov <- matrix(NA, nsim, n_params)
+colnames(ols_est) <- colnames(gls_est) <- names(beta_true)
+
+Stress <- sleep$Stress.Level
+
+# --- Monte Carlo simulation ---
+for (i in 1:nsim) {
+  sigma_i <- 1 + 0.25 * Stress
+  eps     <- rnorm(n, 0, sigma_i)
+  
+  Y_sim <- X_real %*% beta_true + eps
+  data_sim <- as.data.frame(cbind(Y_sim, sleep))
+  colnames(data_sim)[1] <- "Quality.of.Sleep"
+  
+  # --- OLS ---
+  ols <- lm(Quality.of.Sleep ~ Gender + Age + Occupation +
+              Sleep.Duration + Physical.Activity.Level +
+              Stress.Level + BMI.Category + Heart.Rate +
+              Daily.Steps + Sleep.Disorder,
+            data = data_sim)
+  ols_est[i, ] <- coef(ols)
+  ols_ci <- confint(ols)
+  ols_cov[i, ] <- (beta_true >= ols_ci[,1] & beta_true <= ols_ci[,2])
+  
+  # --- GLS ---
+  gls <- gls(Quality.of.Sleep ~ Gender + Age + Occupation +
+               Sleep.Duration + Physical.Activity.Level +
+               Stress.Level + BMI.Category + Heart.Rate +
+               Daily.Steps + Sleep.Disorder,
+             data = data_sim,
+             weights = varExp(form = ~ Stress.Level))
+  gls_est[i, ] <- gls$coefficients
+  gls_ci <- intervals(gls)$coef[, c("lower", "upper")]
+  gls_cov[i, ] <- (beta_true >= gls_ci[,1] & beta_true <= gls_ci[,2])
+}
+
+# --- Functions ---
+bias  <- function(est, true) colMeans(est) - true
+rmse  <- function(est, true) sqrt(colMeans((est - matrix(true, nrow(est), ncol(est), byrow=TRUE))^2))
+cover <- function(cov_mat) colMeans(cov_mat)
+
+# --- Computing summary statistics ---
+ols_bias_vec <- bias(ols_est, beta_true)
+gls_bias_vec <- bias(gls_est, beta_true)
+ols_rmse     <- rmse(ols_est, beta_true)
+gls_rmse     <- rmse(gls_est, beta_true)
+ols_cover    <- cover(ols_cov)
+gls_cover    <- cover(gls_cov)
+
+summary_table <- rbind(
+  OLS_Bias     = ols_bias_vec,
+  GLS_Bias     = gls_bias_vec,
+  OLS_RMSE     = ols_rmse,
+  GLS_RMSE     = gls_rmse,
+  OLS_Coverage = ols_cover,
+  GLS_Coverage = gls_cover
+)
+round(summary_table, 3)
+
+# --- Histogram / Density for a single coefficient ---
+coef_name <- "Stress.Level"   # choose a single coefficient as string, for quick analysis
+
+hist(ols_est[, coef_name],
+     main = paste("OLS Monte Carlo distribution of", coef_name),
+     xlab = coef_name, col = "lightblue", border = "white")
+abline(v = beta_true[coef_name], col = "red", lwd = 2)
+
+hist(gls_est[, coef_name],
+     main = paste("GLS Monte Carlo distribution of", coef_name),
+     xlab = coef_name, col = "lightgreen", border = "white")
+abline(v = beta_true[coef_name], col = "red", lwd = 2)
+
+plot(density(ols_est[, coef_name]),
+     main = paste("Density of", coef_name, "estimates"),
+     xlab = coef_name, lwd = 2)
+lines(density(gls_est[, coef_name]), col = "blue", lwd = 2)
+abline(v = beta_true[coef_name], col = "red", lwd = 3)
+legend("topright", legend = c("OLS", "GLS", "True Value"),
+       col = c("black", "blue", "red"), lwd = 2)
+
+# --- Bias distributions for all coefficients ---
+ols_bias_mat <- ols_est - matrix(beta_true, nsim, n_params, byrow = TRUE)
+gls_bias_mat <- gls_est - matrix(beta_true, nsim, n_params, byrow = TRUE)
+
+# Converting to long format for boxplot
+ols_df <- as.data.frame(ols_bias_mat) %>% mutate(Method = "OLS")
+gls_df <- as.data.frame(gls_bias_mat) %>% mutate(Method = "GLS")
+bias_df <- bind_rows(ols_df, gls_df)
+
+bias_long <- bias_df %>%
+  pivot_longer(cols = -Method, names_to = "Coefficient", values_to = "Bias")
+
+# Boxplot
+ggplot(bias_long, aes(x = Coefficient, y = Bias, fill = Method)) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  theme_minimal() +
+  labs(title = "Bias of OLS vs GLS Monte Carlo Estimates",
+       y = "Bias (Estimated - True)", x = "Coefficient") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_cartesian(ylim = c(-5, 5))  # sets vertical range from -5 to +5
+
+
+# --- Compute average bias per coefficient ---
+avg_bias <- bias_long %>%
+  group_by(Method, Coefficient) %>%
+  summarise(Mean_Bias = mean(Bias), .groups = "drop")
+
+print(avg_bias)
+```
+
+
+Now we want to compute how the untransformed mixed linear models perform:
+## Untransformed Mixed Effect Model (Random Intercept)
+```{r Mixed Random Intercept, message=FALSE, warning=FALSE, cache=TRUE}
+set.seed(42)
+
+# --- Monte Carlo setup ---
+nsim <- 2000
+n    <- nrow(sleep)
+
+mixed_intercept <- lmer(
+  Quality.of.Sleep ~ Gender + Age + Sleep.Duration +
+    Physical.Activity.Level + Stress.Level + BMI.Category +
+    Heart.Rate + Daily.Steps + Sleep.Disorder + (1 | Occupation),
+  data = sleep
+)
+
+# --- Extract true parameters ---
+beta_true <- fixef(mixed_intercept)              # fixed-effect coefficients
+sigma_res <- sigma(mixed_intercept)              # residual SD
+tau_re    <- as.numeric(VarCorr(mixed_intercept)$Occupation) |> sqrt()  # random intercept SD
+
+X_real <- model.matrix(formula(mixed_intercept, fixed.only = TRUE), sleep)
+n_params <- length(beta_true)
+
+# Occupation structure
+occ     <- sleep$Occupation
+occ_ids <- unique(occ)
+n_occ   <- length(occ_ids)
+
+# --- Storage ---
+lmm_est <- matrix(NA, nsim, n_params)
+lmm_cov <- matrix(NA, nsim, n_params)
+colnames(lmm_est) <- names(beta_true)
+
+# --- Monte Carlo simulation ---
+for (i in 1:nsim) {
+  
+  # Simulate random intercepts for each occupation
+  b_occ <- rnorm(n_occ, 0, tau_re)
+  names(b_occ) <- occ_ids
+  
+  # Mapping to each row
+  b_i <- b_occ[as.character(occ)]
+  
+  # Residual errors
+  eps <- rnorm(n, 0, sigma_res)
+  
+  # Generating outcome
+  Y_sim <- X_real %*% beta_true + b_i + eps
+  
+  data_sim <- sleep
+  data_sim$Quality.of.Sleep <- as.numeric(Y_sim)
+  
+  # Refitting mixed model
+  lmm <- suppressMessages(
+    lmer(
+      Quality.of.Sleep ~ Gender + Age + Sleep.Duration +
+        Physical.Activity.Level + Stress.Level + BMI.Category +
+        Heart.Rate + Daily.Steps + Sleep.Disorder + (1 | Occupation),
+      data = data_sim
+    )
+  )
+  
+  # Storing estimates
+  lmm_est[i, ] <- fixef(lmm)
+  
+  # Confidence intervals for fixed effects
+  ci <- confint(lmm, method = "Wald")[names(beta_true), ]
+  lmm_cov[i, ] <- (beta_true >= ci[, 1] & beta_true <= ci[, 2])
+}
+
+# --- Functions ---
+bias  <- function(est, true) colMeans(est) - true
+rmse  <- function(est, true) sqrt(colMeans((est - 
+                                              matrix(true, nrow(est), ncol(est), byrow=TRUE))^2))
+cover <- function(cov_mat) colMeans(cov_mat)
+
+# --- Summary statistics ---
+lmm_bias_vec <- bias(lmm_est, beta_true)
+lmm_rmse     <- rmse(lmm_est, beta_true)
+lmm_cover    <- cover(lmm_cov)
+
+summary_table <- rbind(
+  LMM_Bias     = lmm_bias_vec,
+  LMM_RMSE     = lmm_rmse,
+  LMM_Coverage = lmm_cover
+)
+round(summary_table, 3)
+
+# 1. Setup the grid layout (Calculate square root to find best grid shape)
+n_vars <- ncol(lmm_est)
+n_col  <- ceiling(sqrt(n_vars))
+n_row  <- ceiling(n_vars / n_col)
+
+# Save current settings to restore later
+old_par <- par(no.readonly = TRUE) 
+
+# Create the grid
+par(mfrow = c(n_row, n_col), mar = c(3, 3, 2, 1))
+
+# 2. Loop through every coefficient
+for (coef_name in colnames(lmm_est)) {
+  
+  # Get the data for this specific coefficient
+  vals <- lmm_est[, coef_name]
+  true_val <- beta_true[coef_name]
+  
+  # Determine x-axis limits (so both the distribution and the Red Line fit)
+  # We look at the min/max of the data AND the true value
+  x_limits <- range(c(vals, true_val))
+  
+  # --- Plot 1: Histogram (freq=FALSE is crucial for density overlay) ---
+  hist(vals,
+       freq = FALSE,  # Must be FALSE to plot density lines on top
+       main = coef_name,
+       xlab = "",
+       col = "lightblue",
+       border = "white",
+       xlim = x_limits)
+  
+  # --- Plot 2: Overlay Density Line ---
+  lines(density(vals), lwd = 2, col = "darkblue")
+  
+  # --- Plot 3: Vertical Line for True Beta ---
+  abline(v = true_val, col = "red", lwd = 2, lty = 2) # lty=2 makes it dashed
+}
+
+# Restore original graphics settings
+par(old_par)
+
+# --- Bias distributions for all coefficients ---
+lmm_bias_mat <- lmm_est - matrix(beta_true, nsim, n_params, byrow = TRUE)
+
+bias_df <- as.data.frame(lmm_bias_mat) %>% mutate(Method = "LMM")
+
+bias_long <- bias_df %>%
+  pivot_longer(cols = -Method, names_to = "Coefficient", values_to = "Bias")
+
+ggplot(bias_long, aes(x = Coefficient, y = Bias, fill = Method)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Bias of LMM Monte Carlo Estimates, random intercept model",
+       y = "Bias (Estimated - True)", x = "Coefficient") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# --- Average bias per coefficient ---
+avg_bias <- bias_long %>%
+  group_by(Method, Coefficient) %>%
+  summarise(Mean_Bias = mean(Bias), .groups = "drop")
+
+print(avg_bias)
+```
+## Untransformed Mixed Effect Model (Random Slope)
+```{r Mixed Effects Slope, message=FALSE, warning=FALSE, cache=TRUE}
+set.seed(42)
+
+# --- Monte Carlo setup ---
+nsim <- 2000
+n    <- nrow(sleep)
+
+mixed_slope <- lmer(
+  Quality.of.Sleep ~ Gender + Age + Sleep.Duration +
+    Physical.Activity.Level + BMI.Category +
+    Heart.Rate + Daily.Steps + Sleep.Disorder + 
+    (1 + Stress.Level | Occupation),
+  data = sleep
+)
+
+# --- Extract true fixed effects ---
+beta_true <- fixef(mixed_slope)
+X_real <- model.matrix(formula(mixed_slope, fixed.only = TRUE), sleep)
+n_params <- length(beta_true)
+
+# --- Extract random effects covariance structure ---
+VC <- VarCorr(mixed_slope)
+
+# Random-intercept variance
+tau0  <- attr(VC$Occupation, "stddev")[1]
+
+# Random-slope (Stress.Level) variance
+tau1  <- attr(VC$Occupation, "stddev")[2]
+
+# Covariance between intercept and slope
+cov01 <- attr(VC$Occupation, "correlation")[1, 2] * tau0 * tau1
+
+# Random-effect covariance matrix
+Sigma_RE <- matrix(c(tau0^2, cov01,
+                     cov01, tau1^2), 
+                   nrow = 2, byrow = TRUE)
+
+# Residual SD
+sigma_res <- sigma(mixed_slope)
+
+# Occupation structure
+occ     <- sleep$Occupation
+occ_ids <- unique(occ)
+n_occ   <- length(occ_ids)
+
+# --- Storage ---
+lmm_est <- matrix(NA, nsim, n_params)
+lmm_cov <- matrix(NA, nsim, n_params)
+colnames(lmm_est) <- names(beta_true)
+
+# --- Monte Carlo simulation ---
+for (i in 1:nsim) {
+  
+  # Simulate (b0_j, b1_j) for each occupation
+  b_occ <- mvrnorm(n_occ, mu = c(0, 0), Sigma = Sigma_RE)
+  rownames(b_occ) <- occ_ids
+  
+  # Map random effects to each individual
+  b0_i <- b_occ[as.character(occ), 1]
+  b1_i <- b_occ[as.character(occ), 2]
+  
+  Stress <- sleep$Stress.Level
+  
+  # Residual errors
+  eps <- rnorm(n, 0, sigma_res)
+  
+  # Generate outcome
+  Y_sim <- X_real %*% beta_true + b0_i + b1_i * Stress + eps
+  
+  data_sim <- sleep
+  data_sim$Quality.of.Sleep <- as.numeric(Y_sim)
+  
+  # Refit random-slope LMM
+  lmm <- suppressMessages(
+    lmer(
+      Quality.of.Sleep ~ Gender + Age + Sleep.Duration +
+        Physical.Activity.Level + BMI.Category +
+        Heart.Rate + Daily.Steps + Sleep.Disorder + 
+        (1 + Stress.Level | Occupation),
+      data = data_sim
+    )
+  )
+  
+  # Store fixed-effect estimates
+  lmm_est[i, ] <- fixef(lmm)
+  
+  # Confidence intervals for fixed effects
+  ci <- confint(lmm, method = "Wald")[names(beta_true), ]
+  lmm_cov[i, ] <- (beta_true >= ci[, 1] & beta_true <= ci[, 2])
+}
+
+# --- Summary functions ---
+bias  <- function(est, true) colMeans(est) - true
+rmse  <- function(est, true) sqrt(colMeans((est - 
+                                              matrix(true, nrow(est), ncol(est), byrow=TRUE))^2))
+cover <- function(cov_mat) colMeans(cov_mat)
+
+# --- Summary statistics ---
+lmm_bias_vec <- bias(lmm_est, beta_true)
+lmm_rmse     <- rmse(lmm_est, beta_true)
+lmm_cover    <- cover(lmm_cov)
+
+summary_table <- rbind(
+  LMM_Bias     = lmm_bias_vec,
+  LMM_RMSE     = lmm_rmse,
+  LMM_Coverage = lmm_cover
+)
+round(summary_table, 3)
+
+# --- Coefficient plots ---
+
+# 1. Convert your results matrix to a data frame and reshape it to "long" format
+plot_data <- as.data.frame(lmm_est) %>%
+  pivot_longer(cols = everything(), names_to = "Coefficient", values_to = "Estimate")
+
+# 2. Create a dataframe for the True Beta values (for the red lines)
+true_data <- data.frame(
+  Coefficient = names(beta_true),
+  True_Value = beta_true
+)
+
+# 3. Plot everything at once
+ggplot(plot_data, aes(x = Estimate)) +
+  # Histogram with density curve overlay
+  geom_histogram(aes(y = ..density..), fill = "lightblue", color = "white", bins = 30) +
+  geom_density(alpha = 0.2, fill = "blue") + 
+  # Add the vertical red line for the true value
+  geom_vline(data = true_data, aes(xintercept = True_Value), color = "red", linewidth = 1, linetype="dashed") +
+  # Split into multiple panels
+  facet_wrap(~Coefficient, scales = "free") + 
+  theme_minimal() +
+  labs(title = "Monte Carlo Distribution of All Coefficients (random slope)",
+       subtitle = "Red Dashed Line = True Beta Value",
+       y = "Density",
+       x = "Estimate Value")
+
+# --- Bias distributions for all coefficients ---
+lmm_bias_mat <- lmm_est - matrix(beta_true, nsim, n_params, byrow = TRUE)
+
+bias_df <- as.data.frame(lmm_bias_mat) %>% mutate(Method = "LMM")
+
+bias_long <- bias_df %>%
+  pivot_longer(cols = -Method, names_to = "Coefficient", values_to = "Bias")
+
+ggplot(bias_long, aes(x = Coefficient, y = Bias, fill = Method)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Bias of Random-Slope LMM Monte Carlo Estimates",
+       y = "Bias (Estimated - True)", x = "Coefficient") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# --- Average bias ---
+avg_bias <- bias_long %>%
+  group_by(Method, Coefficient) %>%
+  summarise(Mean_Bias = mean(Bias), .groups = "drop")
+
+print(avg_bias)
+```
+
+Now we want to verify how CLMM performs in a simulation and assess the normality of the error term, and the conservation of Gauss-Markov assumptions:
+
+## ClMM model with Random Intercept
+```{r CLMM Intercept, message=FALSE, warning=FALSE, cache=TRUE}
+set.seed(42)
+
+# --- Setup ---
+nsim <- 2000           
+data_orig <- dataset   
+
+# Ensure outcome is ordered factor
+data_orig$Quality.of.Sleep <- ordered(data_orig$Quality.of.Sleep)
+
+# Fit reference CLMM (The "True" Model)
+model_ref <- clmm(
+  Quality.of.Sleep ~ Stress.Level + Physical.Activity.Level + Age +
+    BMI.Category + Gender + (1 | Occupation),
+  data = data_orig,
+  link = "logit",
+  threshold = "flexible"
+)
+
+# --- Extract True Parameters ---
+beta_true <- model_ref$beta
+theta_true <- model_ref$alpha
+vc <- VarCorr(model_ref)
+sigma_u <- as.numeric(attr(vc$Occupation, "stddev")) # Random effect SD
+
+# --- Construct Fixed Design Matrix (X) ---
+# We remove the intercept (-1) because CLMMs handle intercepts via thresholds (theta)
+X_formula <- ~ Stress.Level + Physical.Activity.Level + Age + BMI.Category + Gender
+X_full <- model.matrix(X_formula, data = data_orig)[, -1, drop = FALSE]
+
+# Ensure X columns align perfectly with beta_true names
+common_cols <- intersect(colnames(X_full), names(beta_true))
+X_real <- X_full[, common_cols, drop = FALSE]
+beta_true <- beta_true[common_cols] # Align beta to X
+
+# Simulation Constants
+n <- nrow(data_orig)
+n_cats <- length(levels(data_orig$Quality.of.Sleep))
+occ_levels <- unique(data_orig$Occupation)
+n_occ <- length(occ_levels)
+
+# Storage
+# Storage for thresholds
+results_theta <- matrix(NA, nrow = nsim, ncol = length(theta_true))
+colnames(results_theta) <- paste0("theta_", seq_along(theta_true))
+results_theta_covered <- matrix(NA, nrow = nsim, ncol = length(theta_true))
+colnames(results_theta_covered) <- paste0("theta_", seq_along(theta_true))
+
+results_beta <- matrix(NA, nrow = nsim, ncol = length(beta_true))
+colnames(results_beta) <- names(beta_true)
+results_covered <- matrix(NA, nrow = nsim, ncol = length(beta_true))
+colnames(results_covered) <- names(beta_true)
+
+success_count <- 0
+
+# --- Helper: Calculate Cumulative Probabilities ---
+get_probs <- function(eta, theta) {
+  n_obs <- length(eta)
+  k <- length(theta)
+  
+  cum_probs <- matrix(NA, nrow = n_obs, ncol = k)
+  for(j in 1:k) {
+    cum_probs[, j] <- plogis(theta[j] - eta)
+  }
+  
+  probs <- matrix(NA, nrow = n_obs, ncol = k + 1)
+  probs[, 1] <- cum_probs[, 1]
+  for(j in 2:k) {
+    probs[, j] <- cum_probs[, j] - cum_probs[, j-1]
+  }
+  probs[, k + 1] <- 1 - cum_probs[, k]
+  
+  probs[probs < 0] <- 0
+  probs[probs > 1] <- 1
+  probs <- probs / rowSums(probs) 
+  return(probs)
+}
+
+print("Starting Monte Carlo Simulation...")
+
+# --- Monte Carlo Loop ---
+for (i in 1:nsim) {
+  
+  # 1. Simulate Random Effects
+  u_sim <- rnorm(n_occ, 0, sigma_u)
+  names(u_sim) <- occ_levels
+  u_i <- u_sim[as.character(data_orig$Occupation)] 
+  
+  # 2. Calculate Linear Predictor
+  eta <- as.vector(X_real %*% beta_true + u_i)
+  
+  # 3. Generate Probabilities and New Outcome
+  probs <- get_probs(eta, theta_true)
+  Y_sim_indices <- apply(probs, 1, function(p) sample(1:n_cats, 1, prob = p))
+  
+  data_sim <- data_orig
+  data_sim$Quality.of.Sleep <- factor(
+    levels(data_orig$Quality.of.Sleep)[Y_sim_indices],
+    levels = levels(data_orig$Quality.of.Sleep),
+    ordered = TRUE
+  )
+  
+  # 4. Refit Model (with error handling)
+  fit_sim <- tryCatch({
+    clmm(
+      Quality.of.Sleep ~ Stress.Level + Physical.Activity.Level + Age +
+        BMI.Category + Gender + (1 | Occupation),
+      data = data_sim,
+      link = "logit",
+      control = clmm.control(maxIter = 200) 
+    )
+  }, error = function(e) return(NULL), warning = function(w) return(NULL))
+  
+  if (is.null(fit_sim)) next 
+  
+  # 5. Store Results (Inside the loop)
+  b_est <- fit_sim$beta
+  
+  # 6️⃣ Threshold estimates
+  theta_est <- fit_sim$alpha
+  
+  # Ensure correct length + ordering
+  if (length(theta_est) == length(theta_true)) {
+    
+    # Standard errors for thresholds (pulled from vcov)
+    se_theta <- tryCatch({
+      sqrt(diag(vcov(fit_sim)))[names(theta_est)]
+    }, error = function(e) NULL)
+    
+    if (!is.null(se_theta)) {
+      lower_t <- theta_est - 1.96 * se_theta
+      upper_t <- theta_est + 1.96 * se_theta
+      
+      results_theta[i, ] <- theta_est
+      results_theta_covered[i, ] <- (theta_true >= lower_t & theta_true <= upper_t)
+    }
+  }
+  
+  # Check if all coefficients are present
+  if(!all(names(beta_true) %in% names(b_est))) next
+  
+  b_est <- b_est[names(beta_true)] 
+  
+  # --- ROBUST SE EXTRACTION (Prevents Hessian crash) ---
+  se <- tryCatch({
+    sqrt(diag(vcov(fit_sim)))
+  }, error = function(e) return(NULL))
+  
+  if (is.null(se)) next 
+  # -----------------------------------------------------
+  
+  if(!all(names(beta_true) %in% names(se))) next
+  se <- se[names(beta_true)]
+  
+  lower <- b_est - 1.96 * se
+  upper <- b_est + 1.96 * se
+  
+  results_beta[i, ] <- b_est
+  results_covered[i, ] <- (beta_true >= lower & beta_true <= upper)
+  
+  success_count <- success_count + 1
+  if (i %% 10 == 0) cat(sprintf("Iteration %d/%d | Successful: %d\n", i, nsim, success_count))
+}
+
+# 2. TREATING RESULTS
+keep <- complete.cases(results_beta)
+results_beta <- results_beta[keep, ]
+results_covered <- results_covered[keep, ]
+
+keep_theta <- complete.cases(results_theta)
+results_theta <- results_theta[keep_theta, ]
+results_theta_covered <- results_theta_covered[keep_theta, ]
+
+
+cat("\nSimulation Complete.\n")
+cat("Successful iterations:", nrow(results_beta), "out of", nsim, "\n\n")
+
+
+# 3. SUMMARY STATISTICS
+p <- ncol(results_beta)
+
+summary_stats <- data.frame(
+  True_Beta = beta_true,
+  Est_Mean = colMeans(results_beta),
+  Bias = colMeans(results_beta) - beta_true,
+  RMSE = sqrt(colMeans((results_beta - matrix(beta_true,
+                                              nrow(results_beta),
+                                              p,
+                                              byrow = TRUE))^2)),
+  Coverage = colMeans(results_covered)
+)
+
+print(round(summary_stats, 4))
+
+
+
+# 4. BIAS PLOTTING 
+bias_df <- sweep(results_beta, 2, beta_true, "-") %>% as.data.frame()
+
+bias_long <- pivot_longer(bias_df,
+                          cols = everything(),
+                          names_to = "Variable",
+                          values_to = "Bias")
+
+# Plot 1 — Density
+plot_density <- ggplot(bias_long, aes(x = Bias)) +
+  geom_density(fill = "lightblue", alpha = 0.6) +
+  geom_vline(xintercept = 0, color = "red",
+             linetype = "dashed", size = 1) +
+  facet_wrap(~Variable, scales = "free") +
+  theme_minimal() +
+  labs(title = "Density of Bias by Predictor",
+       subtitle = "Bias should center on zero",
+       x = "Bias",
+       y = "Density")
+
+# Plot 2 — Boxplots
+plot_box_vert <- ggplot(bias_long,
+                        aes(x = Variable, y = Bias)) +
+  geom_boxplot(fill = "pink", color = "black",
+               alpha = 0.7, outlier.colour = "black") +
+  geom_hline(yintercept = 0, color = "red",
+             linetype = "dashed", size = 1) +
+  theme_minimal() +
+  labs(title = "Bias Distribution by Predictor",
+       x = "Variable", y = "Bias")
+
+print(plot_density)
+print(plot_box_vert)
+
+
+p_theta <- ncol(results_theta)
+
+summary_theta <- data.frame(
+  True_Theta = theta_true,
+  Est_Mean = colMeans(results_theta),
+  Bias = colMeans(results_theta) - theta_true,
+  RMSE = sqrt(colMeans((results_theta - matrix(theta_true,
+                                               nrow(results_theta),
+                                               p_theta,
+                                               byrow = TRUE))^2)),
+  Coverage = colMeans(results_theta_covered)
+)
+
+cat("\nThreshold parameter performance:\n")
+print(round(summary_theta, 4))
+
+
+# Compute bias: each simulation minus true theta
+theta_bias <- sweep(results_theta, 2, theta_true, "-") %>% as.data.frame()
+
+# Handle any non-finite values by replacing them with the column mean
+for(j in seq_along(theta_bias)) {
+  col_vals <- theta_bias[[j]]
+  if(any(!is.finite(col_vals))) {
+    theta_bias[[j]][!is.finite(col_vals)] <- mean(col_vals, na.rm = TRUE)
+  }
+}
+
+# Optional: label thresholds nicely
+threshold_names <- paste0(levels(data_orig$Quality.of.Sleep)[-length(levels(data_orig$Quality.of.Sleep))], "|",
+                          levels(data_orig$Quality.of.Sleep)[-1])
+colnames(theta_bias) <- threshold_names
+
+# Convert to long format for ggplot (do NOT include 'sim')
+theta_bias_long <- theta_bias %>%
+  pivot_longer(cols = everything(), names_to = "Threshold", values_to = "Bias")
+
+# Boxplot of theta bias
+ggplot(theta_bias_long, aes(x = Threshold, y = Bias)) +
+  geom_boxplot(fill = "yellow", alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype="dashed", color="red") +
+  theme_minimal() +
+  labs(
+    title = "Boxplot of Theta Bias from Monte Carlo",
+    x = "Threshold",
+    y = "Bias (Estimate − True)"
+  )
+
+
+```
+
+## ClMM model with Random Slope
+
+```{r CLMM Random Slope, message=FALSE, warning=FALSE, cache=TRUE}
+set.seed(42)
+
+# --- Setup ---
+nsim <- 2000           
+data_orig <- dataset   
+
+# Ensure outcome is ordered factor
+data_orig$Quality.of.Sleep <- ordered(data_orig$Quality.of.Sleep)
+
+# Fit reference CLMM (The "True" Model)
+model_ref <- clmm(
+  Quality.of.Sleep ~ Stress.Level + Physical.Activity.Level + Age +
+    BMI.Category + Gender + (1 | Occupation),
+  data = data_orig,
+  link = "logit",
+  threshold = "flexible"
+)
+
+# --- Extract True Parameters ---
+beta_true <- model_ref$beta
+theta_true <- model_ref$alpha
+vc <- VarCorr(model_ref)
+sigma_u <- as.numeric(attr(vc$Occupation, "stddev")) # Random effect SD
+
+# --- Construct Fixed Design Matrix (X) ---
+# We remove the intercept (-1) because CLMMs handle intercepts via thresholds (theta)
+X_formula <- ~ Stress.Level + Physical.Activity.Level + Age + BMI.Category + Gender
+X_full <- model.matrix(X_formula, data = data_orig)[, -1, drop = FALSE]
+
+# Ensure X columns align perfectly with beta_true names
+common_cols <- intersect(colnames(X_full), names(beta_true))
+X_real <- X_full[, common_cols, drop = FALSE]
+beta_true <- beta_true[common_cols] # Align beta to X
+
+# Simulation Constants
+n <- nrow(data_orig)
+n_cats <- length(levels(data_orig$Quality.of.Sleep))
+occ_levels <- unique(data_orig$Occupation)
+n_occ <- length(occ_levels)
+
+# Storage
+# Storage for thresholds
+results_theta <- matrix(NA, nrow = nsim, ncol = length(theta_true))
+colnames(results_theta) <- paste0("theta_", seq_along(theta_true))
+results_theta_covered <- matrix(NA, nrow = nsim, ncol = length(theta_true))
+colnames(results_theta_covered) <- paste0("theta_", seq_along(theta_true))
+
+results_beta <- matrix(NA, nrow = nsim, ncol = length(beta_true))
+colnames(results_beta) <- names(beta_true)
+results_covered <- matrix(NA, nrow = nsim, ncol = length(beta_true))
+colnames(results_covered) <- names(beta_true)
+
+success_count <- 0
+
+# --- Helper: Calculate Cumulative Probabilities ---
+get_probs <- function(eta, theta) {
+  n_obs <- length(eta)
+  k <- length(theta)
+  
+  cum_probs <- matrix(NA, nrow = n_obs, ncol = k)
+  for(j in 1:k) {
+    cum_probs[, j] <- plogis(theta[j] - eta)
+  }
+  
+  probs <- matrix(NA, nrow = n_obs, ncol = k + 1)
+  probs[, 1] <- cum_probs[, 1]
+  for(j in 2:k) {
+    probs[, j] <- cum_probs[, j] - cum_probs[, j-1]
+  }
+  probs[, k + 1] <- 1 - cum_probs[, k]
+  
+  probs[probs < 0] <- 0
+  probs[probs > 1] <- 1
+  probs <- probs / rowSums(probs) 
+  return(probs)
+}
+
+print("Starting Monte Carlo Simulation...")
+
+# --- Monte Carlo Loop ---
+for (i in 1:nsim) {
+  
+  # 1. Simulate Random Effects
+  u_sim <- rnorm(n_occ, 0, sigma_u)
+  names(u_sim) <- occ_levels
+  u_i <- u_sim[as.character(data_orig$Occupation)] 
+  
+  # 2. Calculate Linear Predictor
+  eta <- as.vector(X_real %*% beta_true + u_i)
+  
+  # 3. Generate Probabilities and New Outcome
+  probs <- get_probs(eta, theta_true)
+  Y_sim_indices <- apply(probs, 1, function(p) sample(1:n_cats, 1, prob = p))
+  
+  data_sim <- data_orig
+  data_sim$Quality.of.Sleep <- factor(
+    levels(data_orig$Quality.of.Sleep)[Y_sim_indices],
+    levels = levels(data_orig$Quality.of.Sleep),
+    ordered = TRUE
+  )
+  
+  # 4. Refit Model (with error handling)
+  fit_sim <- tryCatch({
+    clmm(
+      Quality.of.Sleep ~ Stress.Level + Physical.Activity.Level + Age +
+        BMI.Category + Gender + (1 + Stress.Level | Occupation),
+      data = data_sim,
+      link = "logit",
+      control = clmm.control(maxIter = 200) 
+    )
+  }, error = function(e) return(NULL), warning = function(w) return(NULL))
+  
+  if (is.null(fit_sim)) next 
+  
+  # 5. Store Results (Inside the loop)
+  b_est <- fit_sim$beta
+  
+  # 6️⃣ Threshold estimates
+  theta_est <- fit_sim$alpha
+  
+  # Ensure correct length + ordering
+  if (length(theta_est) == length(theta_true)) {
+    
+    # Standard errors for thresholds (pulled from vcov)
+    se_theta <- tryCatch({
+      sqrt(diag(vcov(fit_sim)))[names(theta_est)]
+    }, error = function(e) NULL)
+    
+    if (!is.null(se_theta)) {
+      lower_t <- theta_est - 1.96 * se_theta
+      upper_t <- theta_est + 1.96 * se_theta
+      
+      results_theta[i, ] <- theta_est
+      results_theta_covered[i, ] <- (theta_true >= lower_t & theta_true <= upper_t)
+    }
+  }
+  
+  # Check if all coefficients are present
+  if(!all(names(beta_true) %in% names(b_est))) next
+  
+  b_est <- b_est[names(beta_true)] 
+  
+  # --- ROBUST SE EXTRACTION (Prevents Hessian crash) ---
+  se <- tryCatch({
+    sqrt(diag(vcov(fit_sim)))
+  }, error = function(e) return(NULL))
+  
+  if (is.null(se)) next 
+  # -----------------------------------------------------
+  
+  if(!all(names(beta_true) %in% names(se))) next
+  se <- se[names(beta_true)]
+  
+  lower <- b_est - 1.96 * se
+  upper <- b_est + 1.96 * se
+  
+  results_beta[i, ] <- b_est
+  results_covered[i, ] <- (beta_true >= lower & beta_true <= upper)
+  
+  success_count <- success_count + 1
+  if (i %% 10 == 0) cat(sprintf("Iteration %d/%d | Successful: %d\n", i, nsim, success_count))
+}
+
+
+
+# 2. TREATING RESULTS
+keep <- complete.cases(results_beta)
+results_beta <- results_beta[keep, ]
+results_covered <- results_covered[keep, ]
+
+keep_theta <- complete.cases(results_theta)
+results_theta <- results_theta[keep_theta, ]
+results_theta_covered <- results_theta_covered[keep_theta, ]
+
+
+cat("\nSimulation Complete.\n")
+cat("Successful iterations:", nrow(results_beta), "out of", nsim, "\n\n")
+
+
+# 3. SUMMARY STATISTICS
+p <- ncol(results_beta)
+
+summary_stats <- data.frame(
+  True_Beta = beta_true,
+  Est_Mean = colMeans(results_beta),
+  Bias = colMeans(results_beta) - beta_true,
+  RMSE = sqrt(colMeans((results_beta - matrix(beta_true,
+                                              nrow(results_beta),
+                                              p,
+                                              byrow = TRUE))^2)),
+  Coverage = colMeans(results_covered)
+)
+
+print(round(summary_stats, 4))
+
+
+
+# 4. BIAS PLOTTING 
+bias_df <- sweep(results_beta, 2, beta_true, "-") %>% as.data.frame()
+
+bias_long <- pivot_longer(bias_df,
+                          cols = everything(),
+                          names_to = "Variable",
+                          values_to = "Bias")
+
+# Plot 1 — Density
+plot_density <- ggplot(bias_long, aes(x = Bias)) +
+  geom_density(fill = "lightblue", alpha = 0.6) +
+  geom_vline(xintercept = 0, color = "red",
+             linetype = "dashed", size = 1) +
+  facet_wrap(~Variable, scales = "free") +
+  theme_minimal() +
+  labs(title = "Density of Bias by Predictor",
+       subtitle = "Bias should center on zero",
+       x = "Bias",
+       y = "Density")
+
+# Plot 2 — Boxplots
+plot_box_vert <- ggplot(bias_long,
+                        aes(x = Variable, y = Bias)) +
+  geom_boxplot(fill = "pink", color = "black",
+               alpha = 0.7, outlier.colour = "black") +
+  geom_hline(yintercept = 0, color = "red",
+             linetype = "dashed", size = 1) +
+  theme_minimal() +
+  labs(title = "Bias Distribution by Predictor",
+       x = "Variable", y = "Bias")
+
+print(plot_density)
+print(plot_box_vert)
+ggsave("bias_density.png", plot_density, width = 10, height = 6, dpi = 300)
+ggsave("bias_boxplot.png", plot_box_vert, width = 10, height = 6, dpi = 300)
+
+p_theta <- ncol(results_theta)
+
+summary_theta <- data.frame(
+  True_Theta = theta_true,
+  Est_Mean = colMeans(results_theta),
+  Bias = colMeans(results_theta) - theta_true,
+  RMSE = sqrt(colMeans((results_theta - matrix(theta_true,
+                                               nrow(results_theta),
+                                               p_theta,
+                                               byrow = TRUE))^2)),
+  Coverage = colMeans(results_theta_covered)
+)
+
+cat("\nThreshold parameter performance:\n")
+print(round(summary_theta, 4))
+
+
+# Compute bias: each simulation minus true theta
+theta_bias <- sweep(results_theta, 2, theta_true, "-") %>% as.data.frame()
+
+# Handle any non-finite values by replacing them with the column mean
+for(j in seq_along(theta_bias)) {
+  col_vals <- theta_bias[[j]]
+  if(any(!is.finite(col_vals))) {
+    theta_bias[[j]][!is.finite(col_vals)] <- mean(col_vals, na.rm = TRUE)
+  }
+}
+
+# Optional: label thresholds nicely
+threshold_names <- paste0(levels(data_orig$Quality.of.Sleep)[-length(levels(data_orig$Quality.of.Sleep))], "|",
+                          levels(data_orig$Quality.of.Sleep)[-1])
+colnames(theta_bias) <- threshold_names
+
+# Convert to long format for ggplot (do NOT include 'sim')
+theta_bias_long <- theta_bias %>%
+  pivot_longer(cols = everything(), names_to = "Threshold", values_to = "Bias")
+
+# Boxplot of theta bias
+ggplot(theta_bias_long, aes(x = Threshold, y = Bias)) +
+  geom_boxplot(fill = "yellow", alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype="dashed", color="red") +
+  theme_minimal() +
+  labs(
+    title = "Boxplot of Theta Bias from Monte Carlo",
+    x = "Threshold",
+    y = "Bias (Estimate − True)"
+  )
+```
+
+---
+
+<div class="toc-ignore" style="text-align: center; color: gray; padding: 20px;">
+  <p><strong>LMDD Project - Group 3</strong></p>
+  <p><em>Analysis performed in R Studio • `r format(Sys.time(), '%Y')`</em></p>
+</div>
+
+
+END OF CODE
